@@ -1,0 +1,91 @@
+package com.mikeos.location
+
+import android.util.Log
+import com.mikeos.core.net.loopbackTrustingClientPublic
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
+
+/**
+ * Posts GNSS fixes to the on-device daemon at POST https://127.0.0.1:7743/api/location.
+ *
+ * This is the single-location-authority push path: the daemon accepts a real fix here
+ * and serves it from GET /api/location to every reader app, regardless of which app is
+ * foregrounded. POST /api/location is an auth-exempt loopback endpoint on the daemon, but
+ * we include the bearer anyway (harmless, and future-proofs if the route is tightened).
+ *
+ * Best-effort: a failed POST (daemon momentarily down) is swallowed; the next fix retries.
+ * The daemon reads: { lat, lon, accuracy, speed, altitude, bearing, satellites, source }.
+ */
+object DaemonLocationClient {
+
+    private const val TAG = "MikeLocation"
+    private const val BASE = "https://127.0.0.1:7743"
+    private const val URL = "$BASE/api/location"
+    private const val BEARER = "7bdc23451b18b5801036f992b66a872670975d19"
+
+    private val JSON = "application/json; charset=utf-8".toMediaType()
+
+    // Loopback-trusting client (self-signed 127.0.0.1 cert), with tight timeouts so a
+    // stuck daemon never wedges the location loop.
+    private val client: OkHttpClient by lazy {
+        loopbackTrustingClientPublic(BASE).newBuilder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .writeTimeout(8, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
+     * Push one fix. Returns true if the daemon acknowledged applying it (`applied:true`).
+     * Never throws — logs and returns false on any error.
+     */
+    fun push(
+        lat: Double,
+        lon: Double,
+        accuracy: Float?,
+        altitude: Double?,
+        speed: Float?,
+        bearing: Float?,
+        satellites: Int?,
+        source: String = "mikelocation",
+    ): Boolean {
+        return try {
+            val body = JSONObject().apply {
+                put("lat", lat)
+                put("lon", lon)
+                if (accuracy != null && !accuracy.isNaN()) put("accuracy", accuracy.toDouble())
+                if (altitude != null && !altitude.isNaN()) put("altitude", altitude)
+                if (speed != null && !speed.isNaN()) put("speed", speed.toDouble())
+                if (bearing != null && !bearing.isNaN()) put("bearing", bearing.toDouble())
+                if (satellites != null) put("satellites", satellites)
+                put("source", source)
+            }.toString()
+
+            val req = Request.Builder()
+                .url(URL)
+                .addHeader("Authorization", "Bearer $BEARER")
+                .post(body.toRequestBody(JSON))
+                .build()
+
+            client.newCall(req).execute().use { resp ->
+                val txt = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "push HTTP ${resp.code}: $txt")
+                    return false
+                }
+                // Never-trust-200: confirm the daemon actually applied the fix.
+                val applied = runCatching { JSONObject(txt).optBoolean("applied", false) }.getOrDefault(false)
+                if (!applied) Log.w(TAG, "daemon did not apply fix: $txt")
+                applied
+            }
+        } catch (e: Exception) {
+            // Daemon down / not reachable yet — fine, retry on the next fix.
+            Log.d(TAG, "push failed (will retry next fix): ${e.message}")
+            false
+        }
+    }
+}
