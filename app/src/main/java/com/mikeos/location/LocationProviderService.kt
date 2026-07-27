@@ -52,12 +52,19 @@ class LocationProviderService : Service() {
         private const val CHANNEL_ID = "mikeos_location"
         private const val NOTIF_ID = 7743
 
-        // Active (screen-on) cadence — keep the daemon well under its 3-min STALE threshold.
-        private const val ACTIVE_INTERVAL_MS = 2_000L
-        private const val ACTIVE_MIN_MS = 1_500L
-        // Backed-off (screen-off) cadence — still fresh enough (< 3 min) but battery-friendly.
-        private const val IDLE_INTERVAL_MS = 30_000L
-        private const val IDLE_MIN_MS = 20_000L
+        // Active cadence = 1 Hz (screen ON, or MOVING regardless of screen — pocket
+        // walks/drives get per-second breadcrumbs; the old 30s pocket cadence made a
+        // walk log look broken).
+        private const val ACTIVE_INTERVAL_MS = 1_000L
+        private const val ACTIVE_MIN_MS = 500L
+        // Background/stationary cadence — 2s (Mike 2026-07-27 after the Monaco battery
+        // audit: 3.5h of continuous GNSS cost 17.8mAh = 1% of drain, so near-always-on
+        // is battery-irrelevant; maximize GPS data for the ecosystem).
+        private const val IDLE_INTERVAL_MS = 2_000L
+        private const val IDLE_MIN_MS = 1_000L
+        // Considered "moving" if the last fix with speed > 0.5 m/s (or >15 m step) was
+        // within this window — keeps 1 Hz through short stops (traffic lights).
+        private const val MOVING_WINDOW_MS = 10 * 60_000L
 
         fun start(ctx: Context) {
             val i = Intent(ctx, LocationProviderService::class.java)
@@ -80,6 +87,7 @@ class LocationProviderService : Service() {
 
     private var screenOn = true
     private var registeredCadence: Long = -1L
+    @Volatile private var lastMovingAt: Long = 0L
 
     // Screen on/off drives the adaptive cadence.
     private val screenReceiver = object : BroadcastReceiver() {
@@ -243,12 +251,20 @@ class LocationProviderService : Service() {
     private fun setScreen(on: Boolean) {
         if (screenOn == on) return
         screenOn = on
-        val interval = if (on) ACTIVE_INTERVAL_MS else IDLE_INTERVAL_MS
-        val minTime = if (on) ACTIVE_MIN_MS else IDLE_MIN_MS
+        applyCadence("screen=${if (on) "ON" else "OFF"}")
+    }
+
+    /** 1 Hz while screen-on OR recently moving; 10s background otherwise. */
+    private fun applyCadence(reason: String) {
+        val moving = System.currentTimeMillis() - lastMovingAt < MOVING_WINDOW_MS
+        val active = screenOn || moving
+        val interval = if (active) ACTIVE_INTERVAL_MS else IDLE_INTERVAL_MS
+        val minTime = if (active) ACTIVE_MIN_MS else IDLE_MIN_MS
         if (interval == registeredCadence) return
         if (!hasLocationPermission()) return
-        Log.d(TAG, "cadence → ${if (on) "active(2s)" else "idle(30s)"}")
-        DebugLog.log("screen=${if (on) "ON" else "OFF"} → cadence ${if (on) "active(2s)" else "idle(30s)"}")
+        val desc = if (active) "active(1s)" else "background(2s)"
+        Log.d(TAG, "cadence → $desc ($reason moving=$moving)")
+        DebugLog.log("$reason moving=$moving → cadence $desc")
         startPlatformUpdates(interval, minTime)
         startFusedIfAvailable(interval)
         registeredCadence = interval
@@ -385,6 +401,15 @@ class LocationProviderService : Service() {
                 (System.currentTimeMillis() - location.time) / 1000,
             ),
         )
+        // Motion detection drives the cadence: speed above walking-noise, or a real
+        // step from the previous fix, marks "moving" -> applyCadence keeps/raises 1 Hz
+        // even with the screen off (pocket walks, drives). Stationary 10 min -> 10s.
+        val prev = lastFix
+        val moved = (location.hasSpeed() && location.speed > 0.5f) ||
+            (prev != null && prev.distanceTo(location) > 15f)
+        if (moved) lastMovingAt = System.currentTimeMillis()
+        applyCadence("fix")
+
         lastFix = location
         scope.launch {
             val ok = DaemonLocationClient.push(

@@ -12,8 +12,8 @@ android {
         applicationId = "com.mikeos.location"
         minSdk = 31
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0-gpsdebug"
+        versionCode = 4
+        versionName = "1.3.0-always-on-2s"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
