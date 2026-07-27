@@ -27,6 +27,16 @@ object DaemonLocationClient {
     private const val URL = "$BASE/api/location"
     private const val BEARER = "7bdc23451b18b5801036f992b66a872670975d19"
 
+    /** Debug telemetry for the 60s heartbeat line + the status screen. */
+    @Volatile var lastResultDesc: String = "never pushed"
+        private set
+    @Volatile var pushOkCount: Long = 0L
+        private set
+    @Volatile var pushFailCount: Long = 0L
+        private set
+    @Volatile var consecutiveFailures: Long = 0L
+        private set
+
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
     // Loopback-trusting client (self-signed 127.0.0.1 cert), with tight timeouts so a
@@ -53,6 +63,10 @@ object DaemonLocationClient {
         satellites: Int?,
         source: String = "mikelocation",
     ): Boolean {
+        val attempt = "push #%d lat=%.5f lon=%.5f acc=%s sat=%s src=%s".format(
+            pushOkCount + pushFailCount + 1, lat, lon,
+            accuracy?.let { "%.0fm".format(it) } ?: "-", satellites?.toString() ?: "-", source,
+        )
         return try {
             val body = JSONObject().apply {
                 put("lat", lat)
@@ -75,17 +89,39 @@ object DaemonLocationClient {
                 val txt = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
                     Log.w(TAG, "push HTTP ${resp.code}: $txt")
+                    // The boot-gate/unpaired 503 lands here — capture code AND body verbatim.
+                    recordFailure("HTTP ${resp.code} body=${txt.take(300)}", attempt)
                     return false
                 }
                 // Never-trust-200: confirm the daemon actually applied the fix.
                 val applied = runCatching { JSONObject(txt).optBoolean("applied", false) }.getOrDefault(false)
-                if (!applied) Log.w(TAG, "daemon did not apply fix: $txt")
+                if (!applied) {
+                    Log.w(TAG, "daemon did not apply fix: $txt")
+                    recordFailure("200-but-not-applied body=${txt.take(300)}", attempt)
+                } else {
+                    recordSuccess(attempt)
+                }
                 applied
             }
         } catch (e: Exception) {
             // Daemon down / not reachable yet — fine, retry on the next fix.
             Log.d(TAG, "push failed (will retry next fix): ${e.message}")
+            recordFailure("EXC ${e.javaClass.simpleName}: ${e.message}", attempt)
             false
         }
+    }
+
+    private fun recordSuccess(attempt: String) {
+        pushOkCount++
+        consecutiveFailures = 0
+        lastResultDesc = "OK (applied)"
+        DebugLog.log("$attempt → OK applied (ok=$pushOkCount fail=$pushFailCount)")
+    }
+
+    private fun recordFailure(desc: String, attempt: String) {
+        pushFailCount++
+        consecutiveFailures++
+        lastResultDesc = desc
+        DebugLog.w("$attempt → FAIL $desc (consecutive=$consecutiveFailures ok=$pushOkCount fail=$pushFailCount)")
     }
 }

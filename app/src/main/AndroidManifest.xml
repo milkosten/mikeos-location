@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- Fallback FGS type while the location permission is not yet granted (a location-typed
+         FGS throws SecurityException without the grant — the old fleet bug). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- As a ROM priv-app it should keep feeding with the screen off / app backgrounded. -->
@@ -36,7 +39,11 @@
         <service
             android:name=".LocationProviderService"
             android:exported="false"
-            android:foregroundServiceType="location" />
+            android:foregroundServiceType="location|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="MikeOS system GNSS provider awaiting location grant" />
+        </service>
 
         <!-- Start the provider on boot (as a priv-app it's granted location by default). -->
         <receiver

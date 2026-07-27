@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -19,6 +20,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -91,17 +93,36 @@ class LocationProviderService : Service() {
 
     private val platformListener = object : LocationListener {
         override fun onLocationChanged(location: Location) = handleFix(location)
-        override fun onProviderEnabled(provider: String) {}
-        override fun onProviderDisabled(provider: String) {}
+        override fun onProviderEnabled(provider: String) {
+            DebugLog.log("provider '$provider' ENABLED")
+        }
+        override fun onProviderDisabled(provider: String) {
+            DebugLog.w("provider '$provider' DISABLED (location toggle off? airplane?)")
+        }
         @Deprecated("deprecated in API 29")
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
     }
 
+    private var heartbeatJob: Job? = null
+
     override fun onCreate() {
         super.onCreate()
+        DebugLog.init(this)
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         createChannel()
-        startForeground(NOTIF_ID, buildNotification("Starting…"))
+        // CRASH-PROOF FGS PROMOTION: an FGS of type `location` throws SecurityException if
+        // neither location permission is granted at startForeground() time (the old fleet
+        // bug). Promote as `location` only when the permission is already held; otherwise
+        // come up as `specialUse` — the type is upgraded to `location` on the first
+        // onStartCommand after the grant (the watchdog re-kicks us every 15 min).
+        promoteToForeground("Starting…")
+        DebugLog.log(
+            "service onCreate — perm fine=${has(Manifest.permission.ACCESS_FINE_LOCATION)} " +
+                "coarse=${has(Manifest.permission.ACCESS_COARSE_LOCATION)} " +
+                "bg=${has(Manifest.permission.ACCESS_BACKGROUND_LOCATION)} " +
+                "providers=${runCatching { locationManager.allProviders }.getOrNull()} " +
+                "sdk=${Build.VERSION.SDK_INT}",
+        )
 
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
@@ -110,8 +131,12 @@ class LocationProviderService : Service() {
         }
         runCatching { registerReceiver(screenReceiver, filter) }
 
+        startHeartbeat()
+        ProviderWatchdogWorker.schedule(this)
+
         if (!hasLocationPermission()) {
             Log.w(TAG, "no location permission yet — service up, waiting for grant")
+            DebugLog.w("NO location permission — GNSS updates NOT registered; waiting for grant (degraded, not crashed)")
             updateNotification("Waiting for location permission")
             return
         }
@@ -125,8 +150,15 @@ class LocationProviderService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // If we came up before the permission was granted, try to (re)start updates now.
+        DebugLog.log(
+            "onStartCommand flags=$flags startId=$startId perm=${hasLocationPermission()} " +
+                "registeredCadence=$registeredCadence",
+        )
+        // If we came up before the permission was granted, try to (re)start updates now
+        // (and upgrade the FGS type from specialUse to location).
         if (hasLocationPermission() && registeredCadence < 0) {
+            DebugLog.log("permission now granted — registering GNSS updates (late grant path)")
+            promoteToForeground("Starting…")
             pushLastKnown()
             startPlatformUpdates(ACTIVE_INTERVAL_MS, ACTIVE_MIN_MS)
             startFusedIfAvailable(ACTIVE_INTERVAL_MS)
@@ -137,13 +169,74 @@ class LocationProviderService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        DebugLog.w("onTaskRemoved — task swiped away (service should survive, START_STICKY)")
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
+        DebugLog.w("service onDestroy — provider going DOWN (lastFix=${fixAgeStr()} lastPush=${DaemonLocationClient.lastResultDesc})")
         runCatching { locationManager.removeUpdates(platformListener) }
         runCatching { unregisterReceiver(screenReceiver) }
         stopFused()
         scope.cancel()
         super.onDestroy()
     }
+
+    /**
+     * startForeground with a type that cannot throw: `location` needs a granted location
+     * permission (SecurityException otherwise, Android 14+), so fall back to `specialUse`
+     * until the grant lands. Any residual failure is logged, never fatal.
+     */
+    private fun promoteToForeground(text: String) {
+        val wantLocation = hasLocationPermission()
+        val type = if (wantLocation) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+        else ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        try {
+            ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(text), type)
+            DebugLog.log("startForeground ok, type=${if (wantLocation) "location" else "specialUse (no perm yet)"}")
+        } catch (e: Exception) {
+            DebugLog.w("startForeground type=$type FAILED ${e.javaClass.simpleName}: ${e.message} — retrying as specialUse")
+            runCatching {
+                ServiceCompat.startForeground(
+                    this, NOTIF_ID, buildNotification(text),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                )
+            }.onFailure { DebugLog.w("startForeground specialUse ALSO failed: ${it.message}") }
+        }
+    }
+
+    // --- 60s debug heartbeat -----------------------------------------------------------
+
+    private fun startHeartbeat() {
+        if (heartbeatJob != null) return
+        heartbeatJob = scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(60_000L)
+                runCatching {
+                    DebugLog.log(
+                        "alive — lastFix=${fixAgeStr()} lastPushResult=${DaemonLocationClient.lastResultDesc} " +
+                            "lastPush=${pushAgeStr()} pushes=${DaemonLocationClient.pushOkCount}ok/" +
+                            "${DaemonLocationClient.pushFailCount}fail " +
+                            "consecFail=${DaemonLocationClient.consecutiveFailures} " +
+                            "cadence=${if (registeredCadence < 0) "NONE" else "${registeredCadence}ms"} " +
+                            "screen=${if (screenOn) "on" else "off"} perm=${hasLocationPermission()}",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun fixAgeStr(): String {
+        val f = lastFix ?: return "NEVER"
+        return "${(System.currentTimeMillis() - f.time) / 1000}s ago"
+    }
+
+    private fun pushAgeStr(): String =
+        if (lastPushAt == 0L) "never" else "${(System.currentTimeMillis() - lastPushAt) / 1000}s ago"
+
+    private fun has(perm: String): Boolean =
+        ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
 
     // --- Cadence -----------------------------------------------------------------------
 
@@ -155,6 +248,7 @@ class LocationProviderService : Service() {
         if (interval == registeredCadence) return
         if (!hasLocationPermission()) return
         Log.d(TAG, "cadence → ${if (on) "active(2s)" else "idle(30s)"}")
+        DebugLog.log("screen=${if (on) "ON" else "OFF"} → cadence ${if (on) "active(2s)" else "idle(30s)"}")
         startPlatformUpdates(interval, minTime)
         startFusedIfAvailable(interval)
         registeredCadence = interval
@@ -184,13 +278,19 @@ class LocationProviderService : Service() {
                 )
                 any = true
                 Log.d(TAG, "requestLocationUpdates on '$p' every ${minTimeMs}ms")
+                DebugLog.log("registered GNSS updates on '$p' every ${minTimeMs}ms")
             } catch (e: SecurityException) {
                 Log.w(TAG, "no permission for provider '$p': ${e.message}")
+                DebugLog.w("SecurityException registering '$p': ${e.message}")
             } catch (e: Exception) {
                 Log.w(TAG, "provider '$p' unavailable: ${e.message}")
+                DebugLog.w("provider '$p' unavailable: ${e.message}")
             }
         }
-        if (!any) Log.w(TAG, "no location providers available")
+        if (!any) {
+            Log.w(TAG, "no location providers available")
+            DebugLog.w("NO location providers registered — the daemon will never get a fix from us")
+        }
     }
 
     private fun pushLastKnown() {
@@ -272,8 +372,19 @@ class LocationProviderService : Service() {
         // Ignore mock/test-provider fixes — the daemon rejects them too, but don't even push.
         if (location.isFromMockProvider) {
             Log.d(TAG, "ignoring mock fix")
+            DebugLog.log("GNSS fix from '${location.provider}' IGNORED (mock provider)")
             return
         }
+        DebugLog.log(
+            "GNSS fix provider=%s lat=%.5f lon=%.5f acc=%s speed=%s sat=%s age=%ds".format(
+                location.provider,
+                location.latitude, location.longitude,
+                if (location.hasAccuracy()) "±%.0fm".format(location.accuracy) else "-",
+                if (location.hasSpeed()) "%.1fm/s".format(location.speed) else "-",
+                location.extras?.getInt("satellites")?.takeIf { it > 0 }?.toString() ?: "-",
+                (System.currentTimeMillis() - location.time) / 1000,
+            ),
+        )
         lastFix = location
         scope.launch {
             val ok = DaemonLocationClient.push(

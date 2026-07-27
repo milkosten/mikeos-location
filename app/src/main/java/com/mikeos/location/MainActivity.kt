@@ -25,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,6 +57,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        DebugLog.init(this)
+        DebugLog.log("MainActivity opened")
+        ProviderWatchdogWorker.schedule(this)
         ensurePermissionsThenStart()
 
         setContent {
@@ -96,10 +100,12 @@ private val statusClient: OkHttpClient by lazy {
 @Composable
 private fun StatusScreen(pad: PaddingValues) {
     var status by remember { mutableStateOf("Reading daemon…") }
+    var debugTail by remember { mutableStateOf(listOf<String>()) }
 
     LaunchedEffect(Unit) {
         while (true) {
             status = fetchDaemonStatus()
+            debugTail = DebugLog.snapshot(8)
             delay(3000)
         }
     }
@@ -128,6 +134,19 @@ private fun StatusScreen(pad: PaddingValues) {
             fontSize = 15.sp,
             color = MaterialTheme.colorScheme.onBackground,
             textAlign = TextAlign.Start,
+        )
+        Spacer(Modifier.height(24.dp))
+        Text(
+            "DEBUG (MikeLocationDebug · files/location-debug.log)",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.secondary,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            if (debugTail.isEmpty()) "no events yet" else debugTail.joinToString("\n"),
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

@@ -12,8 +12,8 @@ android {
         applicationId = "com.mikeos.location"
         minSdk = 31
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0-gpsdebug"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -60,6 +60,9 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // Watchdog: 15-min periodic re-kick of the provider service (persists across reboots).
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 
     // Loopback HTTP to the on-device daemon (POST /api/location). LoopbackHttp trusts
     // only the daemon's self-signed 127.0.0.1 cert.
