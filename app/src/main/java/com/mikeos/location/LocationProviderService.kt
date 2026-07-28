@@ -113,6 +113,11 @@ class LocationProviderService : Service() {
 
     private var heartbeatJob: Job? = null
 
+    // Cell sensing (moved here from the dozy MikeWIFI app). Reads visible towers and feeds
+    // them to the daemon; this service is always-on so cell logging survives Doze.
+    private val cellReader by lazy { CellReader(this) }
+    private var cellJob: Job? = null
+
     override fun onCreate() {
         super.onCreate()
         DebugLog.init(this)
@@ -140,6 +145,7 @@ class LocationProviderService : Service() {
         runCatching { registerReceiver(screenReceiver, filter) }
 
         startHeartbeat()
+        startCellPolling()
         ProviderWatchdogWorker.schedule(this)
 
         if (!hasLocationPermission()) {
@@ -231,6 +237,31 @@ class LocationProviderService : Service() {
                             "screen=${if (screenOn) "on" else "off"} perm=${hasLocationPermission()}",
                     )
                 }
+            }
+        }
+    }
+
+    // --- Cell sensing: read visible towers, feed the daemon (survives Doze) -------------
+
+    private fun startCellPolling() {
+        if (cellJob != null) return
+        cellJob = scope.launch {
+            kotlinx.coroutines.delay(8_000L) // let the first fix + daemon pairing settle
+            while (true) {
+                runCatching {
+                    if (hasLocationPermission()) {
+                        val cells = cellReader.cellKeys()
+                        if (cells.isNotEmpty()) {
+                            DaemonLocationClient.pushCells(cells)
+                            DebugLog.log("cells → daemon: ${cells.size} (${cells.take(2).joinToString()})")
+                        } else {
+                            DebugLog.log("cells: none visible this poll")
+                        }
+                    }
+                }
+                // 25s: the modem serving cell changes slowly; the daemon re-uploads the
+                // current cell at many GPS points between refreshes (dense per-cell obs).
+                kotlinx.coroutines.delay(25_000L)
             }
         }
     }

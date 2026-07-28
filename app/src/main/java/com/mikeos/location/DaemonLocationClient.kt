@@ -25,6 +25,7 @@ object DaemonLocationClient {
     private const val TAG = "MikeLocation"
     private const val BASE = "https://127.0.0.1:7743"
     private const val URL = "$BASE/api/location"
+    private const val CONTEXT_URL = "$BASE/api/location/context"
     private const val BEARER = "7bdc23451b18b5801036f992b66a872670975d19"
 
     /** Debug telemetry for the 60s heartbeat line + the status screen. */
@@ -108,6 +109,32 @@ object DaemonLocationClient {
             Log.d(TAG, "push failed (will retry next fix): ${e.message}")
             recordFailure("EXC ${e.javaClass.simpleName}: ${e.message}", attempt)
             false
+        }
+    }
+
+    /**
+     * Push visible cell towers to the daemon (POST /api/location/context {cells}). The daemon
+     * MERGES these with its context and crowd-sources them on a fresh GNSS fix — the same path
+     * MikeWIFI used, but now driven by this always-on provider so it survives Doze. Cell IDs
+     * are only readable by an app with ACCESS_FINE_LOCATION (this one); the Node daemon can't
+     * read them itself. Best-effort, never throws.
+     */
+    fun pushCells(cells: List<String>) {
+        if (cells.isEmpty()) return
+        try {
+            val arr = org.json.JSONArray()
+            cells.take(6).forEach { arr.put(it) }
+            val body = JSONObject().put("cells", arr).toString()
+            val req = Request.Builder()
+                .url(CONTEXT_URL)
+                .addHeader("Authorization", "Bearer $BEARER")
+                .post(body.toRequestBody(JSON))
+                .build()
+            client.newCall(req).execute().use { resp ->
+                DebugLog.log("cells push (${cells.size}) → HTTP ${resp.code}")
+            }
+        } catch (e: Exception) {
+            DebugLog.w("cells push failed: ${e.message}")
         }
     }
 

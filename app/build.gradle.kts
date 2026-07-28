@@ -12,8 +12,8 @@ android {
         applicationId = "com.mikeos.location"
         minSdk = 31
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.3.0-always-on-2s"
+        versionCode = 5
+        versionName = "1.4.0-cell-sensor"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
