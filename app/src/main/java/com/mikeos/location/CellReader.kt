@@ -43,8 +43,13 @@ class CellReader(private val context: Context) {
      * Visible cell towers as `mcc-mnc-lac-cid` keys, strongest signal first, capped at [cap].
      * Empty on any error / permission gap / no cellular. MUST be called off the main thread.
      */
+    /**
+     * Visible towers as `(mcc-mnc-lac-cid, signal-dBm)` pairs, strongest first,
+     * distinct by key, capped at [cap]. The dBm is what enables signal-weighted
+     * anchoring / RSSI triangulation downstream. Empty on any error/permission gap.
+     */
     @Suppress("DEPRECATION")
-    fun cellKeys(cap: Int = 6): List<String> {
+    fun cellSightings(cap: Int = 6): List<Pair<String, Int>> {
         val telephony = tm ?: return emptyList()
         if (!hasLocationPermission()) return emptyList()
         return try {
@@ -57,13 +62,15 @@ class CellReader(private val context: Context) {
             infos
                 .mapNotNull { info -> keyAndLevel(info) }
                 .sortedByDescending { it.second }
-                .map { it.first }
-                .distinct()
+                .distinctBy { it.first }
                 .take(cap)
         } catch (e: Exception) {
             emptyList()
         }
     }
+
+    /** Keys only (strongest first) — kept for callers that don't need signal. */
+    fun cellKeys(cap: Int = 6): List<String> = cellSightings(cap).map { it.first }
 
     private fun requestFreshCellInfo(telephony: TelephonyManager): List<CellInfo>? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null

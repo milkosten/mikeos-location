@@ -250,10 +250,10 @@ class LocationProviderService : Service() {
             while (true) {
                 runCatching {
                     if (hasLocationPermission()) {
-                        val cells = cellReader.cellKeys()
+                        val cells = cellReader.cellSightings()
                         if (cells.isNotEmpty()) {
                             DaemonLocationClient.pushCells(cells)
-                            DebugLog.log("cells → daemon: ${cells.size} (${cells.take(2).joinToString()})")
+                            DebugLog.log("cells → daemon: ${cells.size} (${cells.take(2).joinToString { "${it.first}@${it.second}dBm" }})")
                         } else {
                             DebugLog.log("cells: none visible this poll")
                         }

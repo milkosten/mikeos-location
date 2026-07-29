@@ -119,11 +119,16 @@ object DaemonLocationClient {
      * are only readable by an app with ACCESS_FINE_LOCATION (this one); the Node daemon can't
      * read them itself. Best-effort, never throws.
      */
-    fun pushCells(cells: List<String>) {
+    fun pushCells(cells: List<Pair<String, Int>>) {
         if (cells.isEmpty()) return
         try {
+            // Send {k,dbm} per tower so the daemon can forward signal strength to
+            // wifi-cloud for signal-weighted anchoring / triangulation. The daemon
+            // still accepts bare key strings, so this is backward compatible.
             val arr = org.json.JSONArray()
-            cells.take(6).forEach { arr.put(it) }
+            cells.take(6).forEach { (key, dbm) ->
+                arr.put(JSONObject().put("k", key).put("dbm", dbm))
+            }
             val body = JSONObject().put("cells", arr).toString()
             val req = Request.Builder()
                 .url(CONTEXT_URL)
